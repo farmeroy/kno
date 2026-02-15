@@ -199,7 +199,7 @@ fn main() {
     let cli = Cli::parse();
 
     let home = env::var("HOME").expect("HOME not set");
-    let notes_dir = PathBuf::from(&home).join(".notes");
+    let notes_dir = PathBuf::from(&home).join(".kno");
 
     match &cli.command {
         Some(Command::Git { args }) => {
@@ -435,7 +435,11 @@ mod tests {
         fs::create_dir_all(tmp.join("sql")).unwrap();
         fs::write(tmp.join("sql/joins.md"), "# Joins\n\n").unwrap();
         fs::create_dir_all(tmp.join("my-project")).unwrap();
-        fs::write(tmp.join("my-project/design-decisions.md"), "# Design Decisions\n\n").unwrap();
+        fs::write(
+            tmp.join("my-project/design-decisions.md"),
+            "# Design Decisions\n\n",
+        )
+        .unwrap();
         fs::write(tmp.join("my-project/ideas.md"), "# Ideas\n\n").unwrap();
     }
 
