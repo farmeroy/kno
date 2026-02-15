@@ -31,6 +31,13 @@ enum Command {
         #[arg(short, long)]
         notes: bool,
     },
+
+    /// Run git commands in the notes directory
+    #[command(trailing_var_arg = true)]
+    Git {
+        /// Arguments to pass to git
+        args: Vec<String>,
+    },
 }
 
 fn titlecase(s: &str) -> String {
@@ -118,9 +125,11 @@ fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut
     let entries: Vec<_> = entries
         .into_iter()
         .filter(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
             let ft = e.file_type().unwrap();
             if ft.is_dir() {
-                true
+                !name_str.starts_with('.')
             } else {
                 show_notes && e.path().extension().is_some_and(|ext| ext == "md")
             }
@@ -168,16 +177,40 @@ fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, show_notes: bool)
     output
 }
 
+fn run_git(notes_dir: &std::path::Path, args: &[String]) {
+    let is_init = args.first().is_some_and(|a| a == "init");
+
+    if !is_init && !notes_dir.join(".git").exists() {
+        eprintln!("Notes directory is not a git repo. Run `kno git init` to initialize.");
+        process::exit(1);
+    }
+
+    let status = process::Command::new("git")
+        .arg("-C")
+        .arg(notes_dir)
+        .args(args)
+        .status()
+        .expect("failed to run git");
+
+    process::exit(status.code().unwrap_or(1));
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let home = env::var("HOME").expect("HOME not set");
     let notes_dir = PathBuf::from(&home).join(".notes");
 
-    if let Some(Command::List { path, notes }) = &cli.command {
-        let output = list_notes(&notes_dir, path.as_deref(), *notes);
-        print!("{output}");
-        return;
+    match &cli.command {
+        Some(Command::Git { args }) => {
+            run_git(&notes_dir, args);
+        }
+        Some(Command::List { path, notes }) => {
+            let output = list_notes(&notes_dir, path.as_deref(), *notes);
+            print!("{output}");
+            return;
+        }
+        None => {}
     }
 
     let file_path = open_note(&notes_dir, cli.path.as_deref());
@@ -506,5 +539,73 @@ my-project\n\
             }
             _ => panic!("expected List command"),
         }
+    }
+
+    #[test]
+    fn test_cli_parses_git_subcommand() {
+        let cli = Cli::parse_from(["kno", "git", "status"]);
+        match &cli.command {
+            Some(Command::Git { args }) => {
+                assert_eq!(args, &["status"]);
+            }
+            _ => panic!("expected Git command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_git_with_multiple_args() {
+        let cli = Cli::parse_from(["kno", "git", "log", "--oneline"]);
+        match &cli.command {
+            Some(Command::Git { args }) => {
+                assert_eq!(args, &["log", "--oneline"]);
+            }
+            _ => panic!("expected Git command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parses_git_no_args() {
+        let cli = Cli::parse_from(["kno", "git"]);
+        match &cli.command {
+            Some(Command::Git { args }) => {
+                assert!(args.is_empty());
+            }
+            _ => panic!("expected Git command"),
+        }
+    }
+
+    #[test]
+    fn test_git_init_creates_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let notes_dir = tmp.path().join("notes");
+        fs::create_dir_all(&notes_dir).unwrap();
+
+        assert!(!notes_dir.join(".git").exists());
+
+        let status = process::Command::new("git")
+            .arg("-C")
+            .arg(&notes_dir)
+            .arg("init")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(notes_dir.join(".git").exists());
+    }
+
+    #[test]
+    fn test_list_hides_dot_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        // Create a .git dir and a .templates dir
+        fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        fs::create_dir_all(tmp.path().join(".templates")).unwrap();
+
+        let output = list_notes(tmp.path(), None, false);
+        assert!(!output.contains(".git"));
+        assert!(!output.contains(".templates"));
+        // But regular dirs still show
+        assert!(output.contains("daily"));
+        assert!(output.contains("sql"));
     }
 }
