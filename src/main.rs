@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::process;
 
 use chrono::Local;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(about = "A simple notes CLI")]
+#[command(about = "A simple notes CLI", args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Note path (e.g. sql/joins). Opens daily note if omitted.
     path: Option<String>,
@@ -15,6 +15,22 @@ struct Cli {
     /// Text to append to the note. Appends and exits without opening editor.
     #[arg(short, long, allow_hyphen_values = true)]
     append: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List note topics and directories
+    List {
+        /// Directory to list (lists all if omitted)
+        path: Option<String>,
+
+        /// Show individual notes, not just directories
+        #[arg(short, long)]
+        notes: bool,
+    },
 }
 
 fn titlecase(s: &str) -> String {
@@ -91,11 +107,78 @@ fn append_to_note(file_path: &std::path::Path, text: &str) {
     writeln!(file, "{text}").expect("failed to append to note");
 }
 
+fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut String) {
+    let mut entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+        Err(_) => return,
+    };
+    entries.sort_by_key(|e| e.file_name());
+
+    // Filter: dirs always, files only if show_notes and .md extension
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| {
+            let ft = e.file_type().unwrap();
+            if ft.is_dir() {
+                true
+            } else {
+                show_notes && e.path().extension().is_some_and(|ext| ext == "md")
+            }
+        })
+        .collect();
+
+    for (i, entry) in entries.iter().enumerate() {
+        let is_last = i == entries.len() - 1;
+        let connector = if is_last { "└── " } else { "├── " };
+        let name = entry.file_name();
+        let display_name = if entry.file_type().unwrap().is_file() {
+            // Strip .md extension for display
+            let n = name.to_string_lossy();
+            n.strip_suffix(".md").unwrap_or(&n).to_string()
+        } else {
+            name.to_string_lossy().to_string()
+        };
+
+        output.push_str(&format!("{prefix}{connector}{display_name}\n"));
+
+        if entry.file_type().unwrap().is_dir() {
+            let child_prefix = if is_last {
+                format!("{prefix}    ")
+            } else {
+                format!("{prefix}│   ")
+            };
+            list_tree(&entry.path(), &child_prefix, show_notes, output);
+        }
+    }
+}
+
+fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, show_notes: bool) -> String {
+    let root = match path {
+        Some(p) => notes_dir.join(p),
+        None => notes_dir.to_path_buf(),
+    };
+
+    if !root.is_dir() {
+        return format!("{} is not a directory\n", root.display());
+    }
+
+    let label = path.unwrap_or(".");
+    let mut output = format!("{label}\n");
+    list_tree(&root, "", show_notes, &mut output);
+    output
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let home = env::var("HOME").expect("HOME not set");
     let notes_dir = PathBuf::from(&home).join(".notes");
+
+    if let Some(Command::List { path, notes }) = &cli.command {
+        let output = list_notes(&notes_dir, path.as_deref(), *notes);
+        print!("{output}");
+        return;
+    }
 
     let file_path = open_note(&notes_dir, cli.path.as_deref());
 
@@ -306,5 +389,122 @@ mod tests {
         let cli = Cli::parse_from(["kno", "sql/joins", "-a", "- todo item"]);
         assert_eq!(cli.path.as_deref(), Some("sql/joins"));
         assert_eq!(cli.append.as_deref(), Some("- todo item"));
+    }
+
+    fn setup_test_notes(tmp: &std::path::Path) {
+        // Create a structure:
+        // daily/2026/02-15.md
+        // sql/joins.md
+        // my-project/design-decisions.md
+        // my-project/ideas.md
+        fs::create_dir_all(tmp.join("daily/2026")).unwrap();
+        fs::write(tmp.join("daily/2026/02-15.md"), "# 2026-02-15\n\n").unwrap();
+        fs::create_dir_all(tmp.join("sql")).unwrap();
+        fs::write(tmp.join("sql/joins.md"), "# Joins\n\n").unwrap();
+        fs::create_dir_all(tmp.join("my-project")).unwrap();
+        fs::write(tmp.join("my-project/design-decisions.md"), "# Design Decisions\n\n").unwrap();
+        fs::write(tmp.join("my-project/ideas.md"), "# Ideas\n\n").unwrap();
+    }
+
+    #[test]
+    fn test_list_dirs_only() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        let output = list_notes(tmp.path(), None, false);
+        assert_eq!(
+            output,
+            "\
+.\n\
+├── daily\n\
+│   └── 2026\n\
+├── my-project\n\
+└── sql\n"
+        );
+    }
+
+    #[test]
+    fn test_list_with_notes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        let output = list_notes(tmp.path(), None, true);
+        let expected = [
+            ".",
+            "├── daily",
+            "│   └── 2026",
+            "│       └── 02-15",
+            "├── my-project",
+            "│   ├── design-decisions",
+            "│   └── ideas",
+            "└── sql",
+            "    └── joins",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_list_subtree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        let output = list_notes(tmp.path(), Some("my-project"), false);
+        // No subdirs in my-project, so just the label
+        assert_eq!(output, "my-project\n");
+    }
+
+    #[test]
+    fn test_list_subtree_with_notes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        let output = list_notes(tmp.path(), Some("my-project"), true);
+        assert_eq!(
+            output,
+            "\
+my-project\n\
+├── design-decisions\n\
+└── ideas\n"
+        );
+    }
+
+    #[test]
+    fn test_list_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let output = list_notes(tmp.path(), None, false);
+        assert_eq!(output, ".\n");
+    }
+
+    #[test]
+    fn test_cli_parses_list_subcommand() {
+        let cli = Cli::parse_from(["kno", "list"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::List { notes: false, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parses_list_with_notes_flag() {
+        let cli = Cli::parse_from(["kno", "list", "-n"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::List { notes: true, .. })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parses_list_with_path() {
+        let cli = Cli::parse_from(["kno", "list", "sql"]);
+        match &cli.command {
+            Some(Command::List { path, notes }) => {
+                assert_eq!(path.as_deref(), Some("sql"));
+                assert!(!notes);
+            }
+            _ => panic!("expected List command"),
+        }
     }
 }
