@@ -10,7 +10,11 @@ use clap::Parser;
 #[command(about = "A simple notes CLI")]
 struct Cli {
     /// Note path (e.g. sql/joins). Opens daily note if omitted.
-    path: Vec<String>,
+    path: Option<String>,
+
+    /// Text to append to the note. Appends and exits without opening editor.
+    #[arg(short, long, allow_hyphen_values = true)]
+    append: Option<String>,
 }
 
 fn titlecase(s: &str) -> String {
@@ -29,39 +33,37 @@ fn titlecase(s: &str) -> String {
         .join(" ")
 }
 
-fn resolve_note(args: &[String]) -> (PathBuf, String) {
+fn resolve_note(path: Option<&str>) -> (PathBuf, String) {
     let today = Local::now().format("%Y-%m-%d").to_string();
 
-    if args.is_empty() {
-        // Default: daily directory with year grouping
-        let parts: Vec<&str> = today.splitn(2, '-').collect();
-        let year = parts[0];
-        let rest = parts[1]; // MM-DD
-        let path = PathBuf::from("daily").join(year).join(format!("{rest}.md"));
-        let header = format!("# {today}");
-        (path, header)
-    } else {
-        let note_path = args.join("/");
-        if note_path.ends_with('/') {
-            // Trailing slash: treat as directory, use today's date as filename
-            let path = PathBuf::from(&note_path).join(format!("{today}.md"));
+    match path {
+        None => {
+            // Default: daily directory with year grouping
+            let parts: Vec<&str> = today.splitn(2, '-').collect();
+            let year = parts[0];
+            let rest = parts[1]; // MM-DD
+            let path = PathBuf::from("daily").join(year).join(format!("{rest}.md"));
             let header = format!("# {today}");
             (path, header)
-        } else {
+        }
+        Some(note_path) if note_path.ends_with('/') => {
+            // Trailing slash: treat as directory, use today's date as filename
+            let path = PathBuf::from(note_path).join(format!("{today}.md"));
+            let header = format!("# {today}");
+            (path, header)
+        }
+        Some(note_path) => {
             // Explicit note name
             let path = PathBuf::from(format!("{note_path}.md"));
-            let stem = path
-                .file_stem()
-                .unwrap()
-                .to_string_lossy();
+            let stem = path.file_stem().unwrap().to_string_lossy();
             let header = format!("# {}", titlecase(&stem));
             (path, header)
         }
     }
 }
 
-fn open_note(notes_dir: &std::path::Path, args: &[String]) -> PathBuf {
-    let (relative_path, header) = resolve_note(args);
+fn open_note(notes_dir: &std::path::Path, path: Option<&str>) -> PathBuf {
+    let (relative_path, header) = resolve_note(path);
     let file_path = notes_dir.join(&relative_path);
 
     if let Some(parent) = file_path.parent() {
@@ -80,13 +82,27 @@ fn open_note(notes_dir: &std::path::Path, args: &[String]) -> PathBuf {
     file_path
 }
 
+fn append_to_note(file_path: &std::path::Path, text: &str) {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(file_path)
+        .expect("failed to open note for appending");
+    writeln!(file, "{text}").expect("failed to append to note");
+}
+
 fn main() {
     let cli = Cli::parse();
 
     let home = env::var("HOME").expect("HOME not set");
     let notes_dir = PathBuf::from(&home).join(".notes");
 
-    let file_path = open_note(&notes_dir, &cli.path);
+    let file_path = open_note(&notes_dir, cli.path.as_deref());
+
+    if let Some(text) = &cli.append {
+        append_to_note(&file_path, text);
+        return;
+    }
 
     let editor = env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
 
@@ -124,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_resolve_daily_note() {
-        let (path, header) = resolve_note(&[]);
+        let (path, header) = resolve_note(None);
         let today = Local::now().format("%Y-%m-%d").to_string();
         let parts: Vec<&str> = today.splitn(2, '-').collect();
         let expected_path = PathBuf::from("daily")
@@ -136,40 +152,48 @@ mod tests {
 
     #[test]
     fn test_resolve_simple_note() {
-        let args = vec!["foo".to_string()];
-        let (path, header) = resolve_note(&args);
+        let (path, header) = resolve_note(Some("foo"));
         assert_eq!(path, PathBuf::from("foo.md"));
         assert_eq!(header, "# Foo");
     }
 
     #[test]
     fn test_resolve_nested_note() {
-        let args = vec!["sql/joins".to_string()];
-        let (path, header) = resolve_note(&args);
-        assert_eq!(path, PathBuf::from("sql/joins.md"));
-        assert_eq!(header, "# Joins");
-    }
-
-    #[test]
-    fn test_resolve_multi_args_joined() {
-        let args = vec!["sql".to_string(), "joins".to_string()];
-        let (path, header) = resolve_note(&args);
+        let (path, header) = resolve_note(Some("sql/joins"));
         assert_eq!(path, PathBuf::from("sql/joins.md"));
         assert_eq!(header, "# Joins");
     }
 
     #[test]
     fn test_resolve_hyphenated_name() {
-        let args = vec!["my-project/design-decisions".to_string()];
-        let (path, header) = resolve_note(&args);
+        let (path, header) = resolve_note(Some("my-project/design-decisions"));
         assert_eq!(path, PathBuf::from("my-project/design-decisions.md"));
         assert_eq!(header, "# Design Decisions");
     }
 
     #[test]
+    fn test_resolve_trailing_slash_uses_date() {
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let (path, header) = resolve_note(Some("my-dir/"));
+        assert_eq!(path, PathBuf::from(format!("my-dir/{today}.md")));
+        assert_eq!(header, format!("# {today}"));
+    }
+
+    #[test]
+    fn test_resolve_nested_trailing_slash() {
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let (path, header) = resolve_note(Some("projects/myproject/"));
+        assert_eq!(
+            path,
+            PathBuf::from(format!("projects/myproject/{today}.md"))
+        );
+        assert_eq!(header, format!("# {today}"));
+    }
+
+    #[test]
     fn test_daily_note_creates_dirs_and_file() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let path = open_note(tmp.path(), &[]);
+        let path = open_note(tmp.path(), None);
 
         assert!(path.exists());
         assert!(path.starts_with(tmp.path().join("daily")));
@@ -181,8 +205,7 @@ mod tests {
     #[test]
     fn test_nested_note_creates_dirs() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let args = vec!["sql/joins".to_string()];
-        let path = open_note(tmp.path(), &args);
+        let path = open_note(tmp.path(), Some("sql/joins"));
 
         assert_eq!(path, tmp.path().join("sql/joins.md"));
         assert!(tmp.path().join("sql").is_dir());
@@ -193,44 +216,20 @@ mod tests {
     #[test]
     fn test_existing_file_not_overwritten() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let args = vec!["foo".to_string()];
 
-        open_note(tmp.path(), &args);
-
+        open_note(tmp.path(), Some("foo"));
         fs::write(tmp.path().join("foo.md"), "# Foo\n\nMy notes here\n").unwrap();
 
-        open_note(tmp.path(), &args);
+        open_note(tmp.path(), Some("foo"));
         let content = fs::read_to_string(tmp.path().join("foo.md")).unwrap();
         assert_eq!(content, "# Foo\n\nMy notes here\n");
-    }
-
-    #[test]
-    fn test_resolve_trailing_slash_uses_date() {
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let args = vec!["my-dir/".to_string()];
-        let (path, header) = resolve_note(&args);
-        assert_eq!(path, PathBuf::from(format!("my-dir/{today}.md")));
-        assert_eq!(header, format!("# {today}"));
-    }
-
-    #[test]
-    fn test_resolve_nested_trailing_slash() {
-        let today = Local::now().format("%Y-%m-%d").to_string();
-        let args = vec!["projects/myproject/".to_string()];
-        let (path, header) = resolve_note(&args);
-        assert_eq!(
-            path,
-            PathBuf::from(format!("projects/myproject/{today}.md"))
-        );
-        assert_eq!(header, format!("# {today}"));
     }
 
     #[test]
     fn test_trailing_slash_creates_dir_and_dated_note() {
         let tmp = tempfile::TempDir::new().unwrap();
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let args = vec!["my-dir/".to_string()];
-        let path = open_note(tmp.path(), &args);
+        let path = open_note(tmp.path(), Some("my-dir/"));
 
         assert_eq!(path, tmp.path().join(format!("my-dir/{today}.md")));
         assert!(tmp.path().join("my-dir").is_dir());
@@ -244,10 +243,68 @@ mod tests {
         let file = tmp.path().join("foo.md");
         fs::write(&file, "").unwrap();
 
-        let args = vec!["foo".to_string()];
-        open_note(tmp.path(), &args);
+        open_note(tmp.path(), Some("foo"));
 
         let content = fs::read_to_string(&file).unwrap();
         assert_eq!(content, "# Foo\n\n");
+    }
+
+    #[test]
+    fn test_append_to_note() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = open_note(tmp.path(), Some("foo"));
+
+        append_to_note(&path, "first line");
+        append_to_note(&path, "second line");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# Foo\n\nfirst line\nsecond line\n");
+    }
+
+    #[test]
+    fn test_append_to_daily_note() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = open_note(tmp.path(), None);
+
+        append_to_note(&path, "quick thought");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.ends_with("quick thought\n"));
+    }
+
+    #[test]
+    fn test_append_creates_note_if_new() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = open_note(tmp.path(), Some("new-note"));
+
+        append_to_note(&path, "first entry");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# New Note\n\nfirst entry\n");
+    }
+
+    #[test]
+    fn test_append_text_starting_with_hyphen() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = open_note(tmp.path(), Some("foo"));
+
+        append_to_note(&path, "- my note");
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "# Foo\n\n- my note\n");
+    }
+
+    #[test]
+    fn test_cli_parses_hyphen_append() {
+        let cli = Cli::parse_from(["kno", "-a", "- my note"]);
+        assert_eq!(cli.append.as_deref(), Some("- my note"));
+        assert!(cli.path.is_none());
+    }
+
+    #[test]
+    fn test_cli_parses_hyphen_append_with_path() {
+        let cli = Cli::parse_from(["kno", "sql/joins", "-a", "- todo item"]);
+        assert_eq!(cli.path.as_deref(), Some("sql/joins"));
+        assert_eq!(cli.append.as_deref(), Some("- todo item"));
     }
 }
