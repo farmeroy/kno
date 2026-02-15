@@ -6,6 +6,8 @@ use std::process;
 use chrono::Local;
 use clap::{Parser, Subcommand};
 
+const NOTES_DIR_NAME: &str = ".kno";
+
 #[derive(Parser)]
 #[command(about = "A simple notes CLI", args_conflicts_with_subcommands = true)]
 struct Cli {
@@ -199,7 +201,7 @@ fn main() {
     let cli = Cli::parse();
 
     let home = env::var("HOME").expect("HOME not set");
-    let notes_dir = PathBuf::from(&home).join(".kno");
+    let notes_dir = PathBuf::from(&home).join(NOTES_DIR_NAME);
 
     match &cli.command {
         Some(Command::Git { args }) => {
@@ -224,6 +226,7 @@ fn main() {
 
     let status = process::Command::new(&editor)
         .arg(&file_path)
+        .current_dir(&notes_dir)
         .status()
         .expect("failed to launch editor");
 
