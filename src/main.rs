@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::process;
 
 use chrono::Local;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap_complete::engine::{ArgValueCompleter, PathCompleter};
 
 const NOTES_DIR_NAME: &str = ".kno";
 
@@ -33,6 +34,9 @@ enum Command {
         #[arg(short, long)]
         notes: bool,
     },
+
+    /// Initialize kno: create notes dir, git repo, and shell completions
+    Init,
 
     /// Run git commands in the notes directory
     #[command(trailing_var_arg = true)]
@@ -179,6 +183,69 @@ fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, show_notes: bool)
     output
 }
 
+fn create_notes_dir(notes_dir: &std::path::Path) {
+    if !notes_dir.exists() {
+        fs::create_dir_all(notes_dir).expect("failed to create notes directory");
+        println!("Created {}", notes_dir.display());
+    } else {
+        println!("{} already exists", notes_dir.display());
+    }
+}
+
+fn init_git_repo(notes_dir: &std::path::Path) {
+    if notes_dir.join(".git").exists() {
+        println!("Git repo already initialized");
+        return;
+    }
+
+    match process::Command::new("git")
+        .arg("-C")
+        .arg(notes_dir)
+        .arg("init")
+        .status()
+    {
+        Ok(s) if s.success() => println!("Initialized git repo"),
+        Ok(_) => eprintln!("Warning: git init failed"),
+        Err(e) => eprintln!("Warning: could not run git: {e}"),
+    }
+}
+
+fn setup_shell_completions() {
+    let home = env::var("HOME").expect("HOME not set");
+    let zshrc = PathBuf::from(&home).join(".zshrc");
+    let completion_line = "source <(COMPLETE=zsh kno)";
+
+    let already_present = zshrc
+        .exists()
+        .then(|| fs::read_to_string(&zshrc).unwrap_or_default())
+        .is_some_and(|content| content.contains(completion_line));
+
+    if already_present {
+        println!("Shell completions already configured");
+        return;
+    }
+
+    let result = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&zshrc)
+        .and_then(|mut file| {
+            use std::io::Write;
+            writeln!(file, "\n{completion_line}")
+        });
+
+    match result {
+        Ok(()) => println!("Added shell completions to ~/.zshrc (restart your shell or `source ~/.zshrc`)"),
+        Err(e) => eprintln!("Warning: could not update .zshrc: {e}"),
+    }
+}
+
+fn run_init(notes_dir: &std::path::Path) {
+    create_notes_dir(notes_dir);
+    init_git_repo(notes_dir);
+    setup_shell_completions();
+}
+
 fn run_git(notes_dir: &std::path::Path, args: &[String]) {
     let is_init = args.first().is_some_and(|a| a == "init");
 
@@ -198,17 +265,29 @@ fn run_git(notes_dir: &std::path::Path, args: &[String]) {
 }
 
 fn main() {
-    let cli = Cli::parse();
-
     let home = env::var("HOME").expect("HOME not set");
     let notes_dir = PathBuf::from(&home).join(NOTES_DIR_NAME);
 
-    match &cli.command {
-        Some(Command::Git { args }) => {
+    let mut cmd = Cli::command();
+    cmd = cmd.mut_arg("path", |a| {
+        a.add(ArgValueCompleter::new(
+            PathCompleter::any().current_dir(&notes_dir),
+        ))
+    });
+    clap_complete::CompleteEnv::with_factory(|| cmd.clone()).complete();
+
+    let cli = Cli::from_arg_matches_mut(&mut cmd.get_matches_from(env::args_os())).unwrap();
+
+    match cli.command {
+        Some(Command::Init) => {
+            run_init(&notes_dir);
+            return;
+        }
+        Some(Command::Git { ref args }) => {
             run_git(&notes_dir, args);
         }
-        Some(Command::List { path, notes }) => {
-            let output = list_notes(&notes_dir, path.as_deref(), *notes);
+        Some(Command::List { ref path, notes }) => {
+            let output = list_notes(&notes_dir, path.as_deref(), notes);
             print!("{output}");
             return;
         }
