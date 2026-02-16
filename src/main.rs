@@ -15,6 +15,13 @@ struct Cli {
     /// Note path (e.g. sql/joins). Opens daily note if omitted.
     path: Option<String>,
 
+    /// Print the resolved file path instead of opening the editor.
+    /// Convenience for vim integration, e.g. nnoremap <leader>kn :execute 'e' trim(system('kno -p'))<CR>
+    /// TODO: revisit — this resolves a specific note path rather than the notes dir,
+    /// and has the side effect of creating the file. May want to rethink the semantics.
+    #[arg(short, long)]
+    print: bool,
+
     /// Text to append to the note. Appends and exits without opening editor.
     #[arg(short, long, allow_hyphen_values = true)]
     append: Option<String>,
@@ -25,14 +32,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List note topics and directories
+    /// List notes and directories
     List {
         /// Directory to list (lists all if omitted)
         path: Option<String>,
 
-        /// Show individual notes, not just directories
-        #[arg(short, long)]
-        notes: bool,
+        /// Max depth to display (default: 1, 0 for unlimited)
+        #[arg(short = 'L', long)]
+        level: Option<usize>,
     },
 
     /// Initialize kno: create notes dir, git repo, and shell completions
@@ -120,14 +127,17 @@ fn append_to_note(file_path: &std::path::Path, text: &str) {
     writeln!(file, "{text}").expect("failed to append to note");
 }
 
-fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut String) {
+fn list_tree(dir: &std::path::Path, prefix: &str, max_depth: Option<usize>, depth: usize, output: &mut String) {
+    if max_depth.is_some_and(|m| depth >= m) {
+        return;
+    }
+
     let mut entries: Vec<_> = match fs::read_dir(dir) {
         Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
         Err(_) => return,
     };
     entries.sort_by_key(|e| e.file_name());
 
-    // Filter: dirs always, files only if show_notes and .md extension
     let entries: Vec<_> = entries
         .into_iter()
         .filter(|e| {
@@ -137,7 +147,7 @@ fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut
             if ft.is_dir() {
                 !name_str.starts_with('.')
             } else {
-                show_notes && e.path().extension().is_some_and(|ext| ext == "md")
+                e.path().extension().is_some_and(|ext| ext == "md")
             }
         })
         .collect();
@@ -147,11 +157,9 @@ fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut
         let connector = if is_last { "└── " } else { "├── " };
         let name = entry.file_name();
         let display_name = if entry.file_type().unwrap().is_file() {
-            // Strip .md extension for display
-            let n = name.to_string_lossy();
-            n.strip_suffix(".md").unwrap_or(&n).to_string()
-        } else {
             name.to_string_lossy().to_string()
+        } else {
+            format!("{}/", name.to_string_lossy())
         };
 
         output.push_str(&format!("{prefix}{connector}{display_name}\n"));
@@ -162,12 +170,12 @@ fn list_tree(dir: &std::path::Path, prefix: &str, show_notes: bool, output: &mut
             } else {
                 format!("{prefix}│   ")
             };
-            list_tree(&entry.path(), &child_prefix, show_notes, output);
+            list_tree(&entry.path(), &child_prefix, max_depth, depth + 1, output);
         }
     }
 }
 
-fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, show_notes: bool) -> String {
+fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, max_depth: Option<usize>) -> String {
     let root = match path {
         Some(p) => notes_dir.join(p),
         None => notes_dir.to_path_buf(),
@@ -179,7 +187,7 @@ fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, show_notes: bool)
 
     let label = path.unwrap_or(".");
     let mut output = format!("{label}\n");
-    list_tree(&root, "", show_notes, &mut output);
+    list_tree(&root, "", max_depth, 0, &mut output);
     output
 }
 
@@ -286,8 +294,9 @@ fn main() {
         Some(Command::Git { ref args }) => {
             run_git(&notes_dir, args);
         }
-        Some(Command::List { ref path, notes }) => {
-            let output = list_notes(&notes_dir, path.as_deref(), notes);
+        Some(Command::List { ref path, level }) => {
+            let depth = Some(level.unwrap_or(1)).filter(|&l| l > 0);
+            let output = list_notes(&notes_dir, path.as_deref(), depth);
             print!("{output}");
             return;
         }
@@ -295,6 +304,11 @@ fn main() {
     }
 
     let file_path = open_note(&notes_dir, cli.path.as_deref());
+
+    if cli.print {
+        println!("{}", file_path.display());
+        return;
+    }
 
     if let Some(text) = &cli.append {
         append_to_note(&file_path, text);
@@ -526,38 +540,21 @@ mod tests {
     }
 
     #[test]
-    fn test_list_dirs_only() {
+    fn test_list_all() {
         let tmp = tempfile::TempDir::new().unwrap();
         setup_test_notes(tmp.path());
 
-        let output = list_notes(tmp.path(), None, false);
-        assert_eq!(
-            output,
-            "\
-.\n\
-├── daily\n\
-│   └── 2026\n\
-├── my-project\n\
-└── sql\n"
-        );
-    }
-
-    #[test]
-    fn test_list_with_notes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        setup_test_notes(tmp.path());
-
-        let output = list_notes(tmp.path(), None, true);
+        let output = list_notes(tmp.path(), None, None);
         let expected = [
             ".",
-            "├── daily",
-            "│   └── 2026",
-            "│       └── 02-15",
-            "├── my-project",
-            "│   ├── design-decisions",
-            "│   └── ideas",
-            "└── sql",
-            "    └── joins",
+            "├── daily/",
+            "│   └── 2026/",
+            "│       └── 02-15.md",
+            "├── my-project/",
+            "│   ├── design-decisions.md",
+            "│   └── ideas.md",
+            "└── sql/",
+            "    └── joins.md",
             "",
         ]
         .join("\n");
@@ -565,27 +562,33 @@ mod tests {
     }
 
     #[test]
+    fn test_list_with_depth() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup_test_notes(tmp.path());
+
+        let output = list_notes(tmp.path(), None, Some(1));
+        assert_eq!(
+            output,
+            "\
+.\n\
+├── daily/\n\
+├── my-project/\n\
+└── sql/\n"
+        );
+    }
+
+    #[test]
     fn test_list_subtree() {
         let tmp = tempfile::TempDir::new().unwrap();
         setup_test_notes(tmp.path());
 
-        let output = list_notes(tmp.path(), Some("my-project"), false);
-        // No subdirs in my-project, so just the label
-        assert_eq!(output, "my-project\n");
-    }
-
-    #[test]
-    fn test_list_subtree_with_notes() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        setup_test_notes(tmp.path());
-
-        let output = list_notes(tmp.path(), Some("my-project"), true);
+        let output = list_notes(tmp.path(), Some("my-project"), None);
         assert_eq!(
             output,
             "\
 my-project\n\
-├── design-decisions\n\
-└── ideas\n"
+├── design-decisions.md\n\
+└── ideas.md\n"
         );
     }
 
@@ -593,7 +596,7 @@ my-project\n\
     fn test_list_empty_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
 
-        let output = list_notes(tmp.path(), None, false);
+        let output = list_notes(tmp.path(), None, None);
         assert_eq!(output, ".\n");
     }
 
@@ -602,16 +605,16 @@ my-project\n\
         let cli = Cli::parse_from(["kno", "list"]);
         assert!(matches!(
             cli.command,
-            Some(Command::List { notes: false, .. })
+            Some(Command::List { level: None, .. })
         ));
     }
 
     #[test]
-    fn test_cli_parses_list_with_notes_flag() {
-        let cli = Cli::parse_from(["kno", "list", "-n"]);
+    fn test_cli_parses_list_with_level() {
+        let cli = Cli::parse_from(["kno", "list", "-L", "2"]);
         assert!(matches!(
             cli.command,
-            Some(Command::List { notes: true, .. })
+            Some(Command::List { level: Some(2), .. })
         ));
     }
 
@@ -619,9 +622,9 @@ my-project\n\
     fn test_cli_parses_list_with_path() {
         let cli = Cli::parse_from(["kno", "list", "sql"]);
         match &cli.command {
-            Some(Command::List { path, notes }) => {
+            Some(Command::List { path, level }) => {
                 assert_eq!(path.as_deref(), Some("sql"));
-                assert!(!notes);
+                assert_eq!(*level, None);
             }
             _ => panic!("expected List command"),
         }
@@ -687,7 +690,7 @@ my-project\n\
         fs::create_dir_all(tmp.path().join(".git")).unwrap();
         fs::create_dir_all(tmp.path().join(".templates")).unwrap();
 
-        let output = list_notes(tmp.path(), None, false);
+        let output = list_notes(tmp.path(), None, None);
         assert!(!output.contains(".git"));
         assert!(!output.contains(".templates"));
         // But regular dirs still show
