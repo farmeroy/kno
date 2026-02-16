@@ -106,10 +106,9 @@ fn open_note(notes_dir: &std::path::Path, path: Option<&str>) -> PathBuf {
         fs::create_dir_all(parent).expect("failed to create note directory");
     }
 
-    let needs_header = !file_path.exists()
-        || fs::read_to_string(&file_path)
-            .map(|c| c.trim().is_empty())
-            .unwrap_or(true);
+    let needs_header = fs::read_to_string(&file_path)
+        .map(|c| c.trim().is_empty())
+        .unwrap_or(true);
 
     if needs_header {
         fs::write(&file_path, format!("{header}\n\n")).expect("failed to write note file");
@@ -127,7 +126,13 @@ fn append_to_note(file_path: &std::path::Path, text: &str) {
     writeln!(file, "{text}").expect("failed to append to note");
 }
 
-fn list_tree(dir: &std::path::Path, prefix: &str, max_depth: Option<usize>, depth: usize, output: &mut String) {
+fn list_tree(
+    dir: &std::path::Path,
+    prefix: &str,
+    max_depth: Option<usize>,
+    depth: usize,
+    output: &mut String,
+) {
     if max_depth.is_some_and(|m| depth >= m) {
         return;
     }
@@ -141,36 +146,36 @@ fn list_tree(dir: &std::path::Path, prefix: &str, max_depth: Option<usize>, dept
     let entries: Vec<_> = entries
         .into_iter()
         .filter(|e| {
-            let name = e.file_name();
-            let name_str = name.to_string_lossy();
-            let ft = e.file_type().unwrap();
-            if ft.is_dir() {
-                !name_str.starts_with('.')
-            } else {
-                e.path().extension().is_some_and(|ext| ext == "md")
+            let name_str = e.file_name();
+            let name = name_str.to_string_lossy();
+            match e.file_type().expect("failed to read file type").is_dir() {
+                true => !name.starts_with('.'),
+                false => e.path().extension().is_some_and(|ext| ext == "md"),
             }
         })
         .collect();
 
+    let last = entries.len().saturating_sub(1);
     for (i, entry) in entries.iter().enumerate() {
-        let is_last = i == entries.len() - 1;
-        let connector = if is_last { "└── " } else { "├── " };
-        let name = entry.file_name();
-        let display_name = if entry.file_type().unwrap().is_file() {
-            name.to_string_lossy().to_string()
-        } else {
-            format!("{}/", name.to_string_lossy())
+        let (connector, extension) = match i == last {
+            true => ("└── ", "    "),
+            false => ("├── ", "│   "),
         };
+        let name = entry.file_name();
+        let is_dir = entry
+            .file_type()
+            .expect("failed to read file type")
+            .is_dir();
 
-        output.push_str(&format!("{prefix}{connector}{display_name}\n"));
-
-        if entry.file_type().unwrap().is_dir() {
-            let child_prefix = if is_last {
-                format!("{prefix}    ")
-            } else {
-                format!("{prefix}│   ")
-            };
-            list_tree(&entry.path(), &child_prefix, max_depth, depth + 1, output);
+        match is_dir {
+            true => {
+                output.push_str(&format!("{prefix}{connector}{}/\n", name.to_string_lossy()));
+                let child_prefix = format!("{prefix}{extension}");
+                list_tree(&entry.path(), &child_prefix, max_depth, depth + 1, output);
+            }
+            false => {
+                output.push_str(&format!("{prefix}{connector}{}\n", name.to_string_lossy()));
+            }
         }
     }
 }
@@ -192,12 +197,19 @@ fn list_notes(notes_dir: &std::path::Path, path: Option<&str>, max_depth: Option
 }
 
 fn create_notes_dir(notes_dir: &std::path::Path) {
-    if !notes_dir.exists() {
-        fs::create_dir_all(notes_dir).expect("failed to create notes directory");
-        println!("Created {}", notes_dir.display());
-    } else {
-        println!("{} already exists", notes_dir.display());
+    match notes_dir.exists() {
+        true => println!("{} already exists", notes_dir.display()),
+        false => {
+            fs::create_dir_all(notes_dir).expect("failed to create notes directory");
+            println!("Created {}", notes_dir.display());
+        }
     }
+}
+
+fn git_cmd(notes_dir: &std::path::Path) -> process::Command {
+    let mut cmd = process::Command::new("git");
+    cmd.arg("-C").arg(notes_dir);
+    cmd
 }
 
 fn init_git_repo(notes_dir: &std::path::Path) {
@@ -206,12 +218,7 @@ fn init_git_repo(notes_dir: &std::path::Path) {
         return;
     }
 
-    match process::Command::new("git")
-        .arg("-C")
-        .arg(notes_dir)
-        .arg("init")
-        .status()
-    {
+    match git_cmd(notes_dir).arg("init").status() {
         Ok(s) if s.success() => println!("Initialized git repo"),
         Ok(_) => eprintln!("Warning: git init failed"),
         Err(e) => eprintln!("Warning: could not run git: {e}"),
@@ -243,7 +250,9 @@ fn setup_shell_completions() {
         });
 
     match result {
-        Ok(()) => println!("Added shell completions to ~/.zshrc (restart your shell or `source ~/.zshrc`)"),
+        Ok(()) => println!(
+            "Added shell completions to ~/.zshrc (restart your shell or `source ~/.zshrc`)"
+        ),
         Err(e) => eprintln!("Warning: could not update .zshrc: {e}"),
     }
 }
@@ -262,9 +271,7 @@ fn run_git(notes_dir: &std::path::Path, args: &[String]) {
         process::exit(1);
     }
 
-    let status = process::Command::new("git")
-        .arg("-C")
-        .arg(notes_dir)
+    let status = git_cmd(notes_dir)
         .args(args)
         .status()
         .expect("failed to run git");
@@ -305,25 +312,19 @@ fn main() {
 
     let file_path = open_note(&notes_dir, cli.path.as_deref());
 
-    if cli.print {
-        println!("{}", file_path.display());
-        return;
+    match (cli.print, cli.append) {
+        (true, _) => println!("{}", file_path.display()),
+        (_, Some(text)) => append_to_note(&file_path, &text),
+        _ => {
+            let editor = env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
+            let status = process::Command::new(&editor)
+                .arg(&file_path)
+                .current_dir(&notes_dir)
+                .status()
+                .expect("failed to launch editor");
+            process::exit(status.code().unwrap_or(1));
+        }
     }
-
-    if let Some(text) = &cli.append {
-        append_to_note(&file_path, text);
-        return;
-    }
-
-    let editor = env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
-
-    let status = process::Command::new(&editor)
-        .arg(&file_path)
-        .current_dir(&notes_dir)
-        .status()
-        .expect("failed to launch editor");
-
-    process::exit(status.code().unwrap_or(1));
 }
 
 #[cfg(test)]
