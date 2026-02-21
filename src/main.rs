@@ -75,10 +75,8 @@ fn resolve_note(path: Option<&str>) -> (PathBuf, String) {
     match path {
         None => {
             // Default: daily directory with year grouping
-            let parts: Vec<&str> = today.splitn(2, '-').collect();
-            let year = parts[0];
-            let rest = parts[1]; // MM-DD
-            let path = PathBuf::from("daily").join(year).join(format!("{rest}.md"));
+            let year = &today[..4];
+            let path = PathBuf::from("daily").join(year).join(format!("{today}.md"));
             let header = format!("# {today}");
             (path, header)
         }
@@ -355,10 +353,10 @@ mod tests {
     fn test_resolve_daily_note() {
         let (path, header) = resolve_note(None);
         let today = Local::now().format("%Y-%m-%d").to_string();
-        let parts: Vec<&str> = today.splitn(2, '-').collect();
+        let year = &today[..4];
         let expected_path = PathBuf::from("daily")
-            .join(parts[0])
-            .join(format!("{}.md", parts[1]));
+            .join(year)
+            .join(format!("{today}.md"));
         assert_eq!(path, expected_path);
         assert_eq!(header, format!("# {today}"));
     }
@@ -523,12 +521,12 @@ mod tests {
 
     fn setup_test_notes(tmp: &std::path::Path) {
         // Create a structure:
-        // daily/2026/02-15.md
+        // daily/2026/2026-02-15.md
         // sql/joins.md
         // my-project/design-decisions.md
         // my-project/ideas.md
         fs::create_dir_all(tmp.join("daily/2026")).unwrap();
-        fs::write(tmp.join("daily/2026/02-15.md"), "# 2026-02-15\n\n").unwrap();
+        fs::write(tmp.join("daily/2026/2026-02-15.md"), "# 2026-02-15\n\n").unwrap();
         fs::create_dir_all(tmp.join("sql")).unwrap();
         fs::write(tmp.join("sql/joins.md"), "# Joins\n\n").unwrap();
         fs::create_dir_all(tmp.join("my-project")).unwrap();
@@ -550,7 +548,7 @@ mod tests {
             ".",
             "├── daily/",
             "│   └── 2026/",
-            "│       └── 02-15.md",
+            "│       └── 2026-02-15.md",
             "├── my-project/",
             "│   ├── design-decisions.md",
             "│   └── ideas.md",
