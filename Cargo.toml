@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "A command line tool for managing notes"
+authors = ["Raffaele Cataldo"]
+repository = "https://github.com/farmeroy/kno"
 
 [dependencies]
 chrono = "0.4.43"
